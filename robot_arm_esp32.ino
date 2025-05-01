@@ -1,8 +1,16 @@
+#include <Arduino.h>
+#include <Wire.h>
 #include <Adafruit_PWMServoDriver.h>
 #include <ArduinoJson.h>
-#include <Wire.h>
 #include "armDriver.h"
 
+// 馬達控制腳位
+const int IN1_FrontLeft = 18, IN2_FrontLeft = 19;
+const int IN3_FrontRight = 16, IN4_FrontRight = 17;
+const int IN1_RearLeft = 25, IN2_RearLeft = 26;
+const int IN3_RearRight = 32, IN4_RearRight = 33;
+
+// 手臂參數
 #define UPDATE_ARM_DELAY 1.0
 #define SERIAL_READ_DELAY 10
 #define SERIAL_WRITE_DELAY 250
@@ -10,203 +18,116 @@ const uint8_t NUM_OF_SERVOS = 5;
 const uint8_t servoMinAngles[] = {0, 0, 0, 0, 0};
 const uint8_t servoMaxAngles[] = {180, 120, 160, 180, 70};
 
-// Enum to define the arm actions
-enum class ArmAction {
-    NO_ACTION,
-    TURN_BASE_LEFT,
-    TURN_BASE_RIGHT,
-    MOVE_ARM_UP,
-    MOVE_ARM_DOWN,
-    SHIFT_ARM_RIGHT,
-    SHIFT_ARM_LEFT,
-    ROTATE_FINGER_RIGHT,
-    ROTATE_FINGER_LEFT
-};
-
-ArmAction armAction = ArmAction::NO_ACTION;
 float currentAngles[NUM_OF_SERVOS];
-uint8_t targetAngles[NUM_OF_SERVOS];
+uint8_t targetAngles[NUM_OF_SERVOS] = {90, 0, 160, 50, 10};
 
-// Define task handles
-TaskHandle_t armControlTask;
-TaskHandle_t serialCommunicationTask;
-TaskHandle_t serialWriterTask;
+// Task Handles
+TaskHandle_t armControlTask, serialCommunicationTask, serialWriterTask;
 
-// This callback gets called any time a new gamepad is connected.
-// Up to 4 gamepads can be connected at the same time.
+// 前進
+void moveForward() {
+  digitalWrite(IN1_FrontLeft, HIGH);  digitalWrite(IN2_FrontLeft, LOW);
+  digitalWrite(IN3_FrontRight, HIGH); digitalWrite(IN4_FrontRight, LOW);
+  digitalWrite(IN1_RearLeft, HIGH);   digitalWrite(IN2_RearLeft, LOW);
+  digitalWrite(IN3_RearRight, HIGH);  digitalWrite(IN4_RearRight, LOW);
+}
 
-// Function declarations
-void armControlTaskFunction(void *parameter);
+// 後退
+void moveBackward() {
+  digitalWrite(IN1_FrontLeft, LOW);  digitalWrite(IN2_FrontLeft, HIGH);
+  digitalWrite(IN3_FrontRight, LOW); digitalWrite(IN4_FrontRight, HIGH);
+  digitalWrite(IN1_RearLeft, LOW);   digitalWrite(IN2_RearLeft, HIGH);
+  digitalWrite(IN3_RearRight, LOW);  digitalWrite(IN4_RearRight, HIGH);
+}
 
-void serialCommunicationTaskFunction(void *parameter);
+// 停止
+void stopAll() {
+  digitalWrite(IN1_FrontLeft, LOW);  digitalWrite(IN2_FrontLeft, LOW);
+  digitalWrite(IN3_FrontRight, LOW); digitalWrite(IN4_FrontRight, LOW);
+  digitalWrite(IN1_RearLeft, LOW);   digitalWrite(IN2_RearLeft, LOW);
+  digitalWrite(IN3_RearRight, LOW);  digitalWrite(IN4_RearRight, LOW);
+}
 
-void serialWriterTaskFunction(void *parameter);
+// 手臂控制任務
+void armControlTaskFunction(void *parameter) {
+  ArmManager armManager(NUM_OF_SERVOS, servoMinAngles, servoMaxAngles);
+  for (;;) {
+    for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
+      armManager.setServoTargetAngle(i, targetAngles[i]);
+    }
+    armManager.moveArm();
+    armManager.getCurrentAngles(currentAngles);
+    vTaskDelay(UPDATE_ARM_DELAY / portTICK_PERIOD_MS);
+  }
+}
+
+// Serial 接收任務
+void serialCommunicationTaskFunction(void *parameter) {
+  String jsonString = "";
+  for (;;) {
+    if (Serial.available()) {
+      jsonString = Serial.readStringUntil('\n');
+      StaticJsonDocument<256> doc;
+      DeserializationError error = deserializeJson(doc, jsonString);
+      if (error) {
+        Serial.print("JSON error: "); Serial.println(error.c_str());
+      } else {
+        if (doc.containsKey("servo_target_angles")) {
+          JsonArray angles = doc["servo_target_angles"].as<JsonArray>();
+          if (angles.size() == NUM_OF_SERVOS) {
+            for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
+              targetAngles[i] = angles[i];
+            }
+          }
+        }
+        if (doc.containsKey("move")) {
+          String action = doc["move"];
+          if (action == "forward") moveForward();
+          else if (action == "backward") moveBackward();
+          else stopAll();
+        }
+      }
+    }
+    vTaskDelay(SERIAL_READ_DELAY / portTICK_PERIOD_MS);
+  }
+}
+
+// Serial 傳送任務
+void serialWriterTaskFunction(void *parameter) {
+  for (;;) {
+    StaticJsonDocument<256> doc;
+    JsonArray angles = doc.createNestedArray("servo_current_angles");
+    for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
+      angles.add(currentAngles[i]);
+    }
+    String out;
+    serializeJson(doc, out);
+    Serial.println(out);
+    vTaskDelay(SERIAL_WRITE_DELAY / portTICK_PERIOD_MS);
+  }
+}
 
 void setup() {
-    // Start serial communication
-    Serial.begin(115200);
+  Serial.begin(115200);
 
-    // Create the arm control task
-    for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
-        currentAngles[i] = (float) servoMinAngles[i];
-        switch (i) {
-            case 0:
-                targetAngles[0] = 90;
-                break;
-            case 1:
-                targetAngles[1] = 0;
-                break;
-            case 2:
-                targetAngles[2] = 160;
-                break;
-            case 3:
-                targetAngles[3] = 50;
-                break;
-            case 4:
-                targetAngles[4] = 10;
-                break;
-            default:
-                break;
-        }
-    }
-    // Create the arm control task
-    Serial.println("xTaskCreatePinnedToCore armControlTaskFunction ");
-    delay(100);
-    xTaskCreatePinnedToCore(
-            armControlTaskFunction, // Task function
-            "Arm Control Task",     // Task name
-            2048,                   // Stack size (in bytes)
-            NULL,                   // Task parameters
-            1,                      // Task priority
-            &armControlTask,        // Task handle
-            0                       // Core ID (0 or 1)
-    );
+  // 輪子腳位初始化
+  pinMode(IN1_FrontLeft, OUTPUT);  pinMode(IN2_FrontLeft, OUTPUT);
+  pinMode(IN3_FrontRight, OUTPUT); pinMode(IN4_FrontRight, OUTPUT);
+  pinMode(IN1_RearLeft, OUTPUT);   pinMode(IN2_RearLeft, OUTPUT);
+  pinMode(IN3_RearRight, OUTPUT);  pinMode(IN4_RearRight, OUTPUT);
+  stopAll();
 
-    // Create the serial communication task
-    Serial.println("xTaskCreatePinnedToCore serialCommunicationTaskFunction ");
-    delay(100);
-    xTaskCreatePinnedToCore(
-            serialCommunicationTaskFunction, // Task function
-            "Serial Communication Task",     // Task name
-            2048,                            // Stack size (in bytes)
-            NULL,                            // Task parameters
-            3,                               // Task priority
-            &serialCommunicationTask,        // Task handle
-            1                                // Core ID (0 or 1)
-    );
-    // Create the serial communication task
-    Serial.println("xTaskCreatePinnedToCore serialWriterTaskFunction ");
-    delay(100);
-    xTaskCreatePinnedToCore(
-            serialWriterTaskFunction, // Task function
-            "Serial Writer Task",     // Task name
-            2048,                     // Stack size (in bytes)
-            NULL,                     // Task parameters
-            2,                        // Task priority
-            &serialWriterTask,        // Task handle
-            0                         // Core ID (0 or 1)
-    );
-    delay(100);
+  // 初始化手臂角度
+  for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
+    currentAngles[i] = servoMinAngles[i];
+  }
+
+  // 建立三個任務
+  xTaskCreatePinnedToCore(armControlTaskFunction, "ArmControl", 2048, NULL, 1, &armControlTask, 0);
+  xTaskCreatePinnedToCore(serialCommunicationTaskFunction, "SerialComm", 2048, NULL, 2, &serialCommunicationTask, 1);
+  xTaskCreatePinnedToCore(serialWriterTaskFunction, "SerialWriter", 2048, NULL, 1, &serialWriterTask, 0);
 }
 
 void loop() {
-    // Empty. Tasks are running in the background.
-}
-
-// Task function for arm control
-void armControlTaskFunction(void *parameter) {
-    // Create an instance of ArmManager
-
-    // uint8_t currentAngles[ArmManager::NUM_SERVOS];
-    ArmManager armManager(NUM_OF_SERVOS, servoMinAngles, servoMaxAngles);
-
-    Serial.println("armControlTaskFunction start");
-
-    for (;;) {
-        // Control the robot arm using ArmManager
-        for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
-            armManager.setServoTargetAngle(i, targetAngles[i]);
-        }
-
-        armManager.moveArm();
-        // armManager.printStatus();
-        armManager.getCurrentAngles(currentAngles);
-        armAction = ArmAction::NO_ACTION;
-
-        // Wait for some time before the next iteration
-        vTaskDelay(UPDATE_ARM_DELAY / portTICK_PERIOD_MS);
-    }
-}
-
-// Task function for serial reader
-void serialCommunicationTaskFunction(void *parameter) {
-    Serial.println("serialCommunicationTaskFunction start ");
-    String jsonString = "";
-    for (;;) {
-        if (Serial.available()) {
-            // Read the incoming serial data
-            jsonString = Serial.readStringUntil('\n');
-            // String jsonString = Serial.readString();
-            Serial.println("receive:");
-            Serial.println(jsonString);
-            // Parse the JSON string
-            StaticJsonDocument<256> doc;
-            DeserializationError error = deserializeJson(doc, jsonString);
-
-            // Check if the JSON parsing was successful
-            if (error) {
-                Serial.print("JSON parsing error: ");
-                Serial.println(error.c_str());
-            } else {
-                // Check if the parsed JSON document contains the "servo_target_angles" array
-                if (doc.containsKey("servo_target_angles")) {
-                    // Get the "servo_target_angles" array from the JSON document
-                    JsonArray servoAngles = doc["servo_target_angles"].as<JsonArray>();
-
-                    // Check if the array size matches the number of servos
-                    if (servoAngles.size() == NUM_OF_SERVOS) {
-                        // Update the target angles in the ArmManager
-                        for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
-                            targetAngles[i] = servoAngles[i];
-                        }
-                    } else {
-                        Serial.println("Invalid number of servo target angles.");
-                    }
-                } else {
-                    Serial.println("Missing servo_target_angles in JSON");
-                }
-            }
-        }
-
-        // Wait for some time before the next iteration
-        vTaskDelay(SERIAL_READ_DELAY / portTICK_PERIOD_MS);
-    }
-}
-
-// Task function for serial writer
-void serialWriterTaskFunction(void *parameter) {
-    Serial.println("serialWriterTaskFunction start");
-
-    for (;;) {
-        StaticJsonDocument<512> doc;
-        // Populate the JSON document with the current angles
-        JsonArray servoAngles = doc.createNestedArray("servo_current_angles");
-        // armManager.getCurrentAngles(currentAngles);
-
-        for (uint8_t i = 0; i < NUM_OF_SERVOS; i++) {
-            servoAngles.add(currentAngles[i]);
-        }
-
-        // Serialize the JSON document to a string
-        String jsonString;
-        serializeJson(doc, jsonString);
-
-        // Print the JSON string
-        Serial.println(jsonString);
-
-        // Read incoming serial data
-
-        // Wait for some time before the next iteration
-        vTaskDelay(SERIAL_WRITE_DELAY / portTICK_PERIOD_MS);
-    }
+  // 不需要執行任何程式碼
 }

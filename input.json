@@ -1,3 +1,19 @@
+// 前手臂放下
+{"servo_target_angles":[50, 100, 60, 60, 60]}
+
+// 手臂歸位
+{"servo_target_angles":[50, 30, 40, 60, 60]}
+
+// 移動
+{"move":"forward"}
+{"move":"backward"}
+{"move":"stop"}
+
+// 後手臂放下
+{"servo_target_angles":[50, 30, 120, 60, 60]}
+
+
+
 {"servo_target_angles":[10,130,50]}
 {"servo_target_angles":[100,100,100]}
 {"servo_target_angles":[50,50,50]}
