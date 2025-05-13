@@ -19,7 +19,7 @@ const uint8_t servoMinAngles[] = {0, 0, 0, 0, 0};
 const uint8_t servoMaxAngles[] = {180, 120, 160, 180, 70};
 
 float currentAngles[NUM_OF_SERVOS];
-uint8_t targetAngles[NUM_OF_SERVOS] = {90, 0, 160, 50, 10};
+uint8_t targetAngles[NUM_OF_SERVOS] = {50, 30, 40, 60, 60};
 
 // Task Handles
 TaskHandle_t armControlTask, serialCommunicationTask, serialWriterTask;
@@ -36,6 +36,22 @@ void moveForward() {
 void moveBackward() {
   digitalWrite(IN1_FrontLeft, LOW);  digitalWrite(IN2_FrontLeft, HIGH);
   digitalWrite(IN3_FrontRight, LOW); digitalWrite(IN4_FrontRight, HIGH);
+  digitalWrite(IN1_RearLeft, LOW);   digitalWrite(IN2_RearLeft, HIGH);
+  digitalWrite(IN3_RearRight, LOW);  digitalWrite(IN4_RearRight, HIGH);
+}
+
+// 左轉
+void turnLeft() {
+  digitalWrite(IN1_FrontLeft, LOW);  digitalWrite(IN2_FrontLeft, HIGH);
+  digitalWrite(IN3_FrontRight, LOW); digitalWrite(IN4_FrontRight, HIGH);
+  digitalWrite(IN1_RearLeft, HIGH);   digitalWrite(IN2_RearLeft, LOW);
+  digitalWrite(IN3_RearRight, HIGH);  digitalWrite(IN4_RearRight, LOW);
+}
+
+// 右轉
+void turnRight() {
+  digitalWrite(IN1_FrontLeft, HIGH);  digitalWrite(IN2_FrontLeft, LOW);
+  digitalWrite(IN3_FrontRight, HIGH); digitalWrite(IN4_FrontRight, LOW);
   digitalWrite(IN1_RearLeft, LOW);   digitalWrite(IN2_RearLeft, HIGH);
   digitalWrite(IN3_RearRight, LOW);  digitalWrite(IN4_RearRight, HIGH);
 }
@@ -63,12 +79,35 @@ void armControlTaskFunction(void *parameter) {
 
 // Serial 接收任務
 void serialCommunicationTaskFunction(void *parameter) {
-  String jsonString = "";
+  String input = "";
+  const uint8_t armPose1[NUM_OF_SERVOS] = {50, 100, 60, 60, 60}; // 前手臂放下
+  const uint8_t armPose2[NUM_OF_SERVOS] = {50, 30, 40, 60, 60};  // 手臂歸位
+  const uint8_t armPose3[NUM_OF_SERVOS] = {50, 30, 120, 60, 60}; // 後手臂放下
+
   for (;;) {
     if (Serial.available()) {
-      jsonString = Serial.readStringUntil('\n');
+      input = Serial.readStringUntil('\n');
+
+      // ✅ 單字元快捷鍵判斷
+      if (input.length() == 1) {
+        char cmd = input.charAt(0);
+        switch (cmd) {
+          case 'w': moveForward(); break;
+          case 's': moveBackward(); break;
+          case 'a': turnLeft(); break;
+          case 'd': turnRight(); break;
+          case 'z': stopAll(); break;
+          case '3': memcpy(targetAngles, armPose1, NUM_OF_SERVOS); break;
+          case '2': memcpy(targetAngles, armPose2, NUM_OF_SERVOS); break;
+          case '1': memcpy(targetAngles, armPose3, NUM_OF_SERVOS); break;
+        }
+
+        continue; // 不做 JSON 處理
+      }
+
+      // ✅ JSON 判斷邏輯維持不變
       StaticJsonDocument<256> doc;
-      DeserializationError error = deserializeJson(doc, jsonString);
+      DeserializationError error = deserializeJson(doc, input);
       if (error) {
         Serial.print("JSON error: "); Serial.println(error.c_str());
       } else {
@@ -91,6 +130,7 @@ void serialCommunicationTaskFunction(void *parameter) {
     vTaskDelay(SERIAL_READ_DELAY / portTICK_PERIOD_MS);
   }
 }
+
 
 // Serial 傳送任務
 void serialWriterTaskFunction(void *parameter) {
